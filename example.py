@@ -4,11 +4,10 @@ import matplotlib.pyplot as plt
 import torch
 import wbml.out
 import wbml.plot
+from gpar import GPARRegressor
 from lab import B
 from matrix import Dense, Diagonal
 from varz.torch import minimise_l_bfgs_b
-
-from gpar import GPARRegressor
 
 
 def Model(**kw_args):
@@ -19,6 +18,7 @@ def Model(**kw_args):
 p = 16
 m = 5
 gpar = GPARRegressor()
+dense_noise = False
 
 m_true = m  # True number of latent processes.
 
@@ -31,9 +31,6 @@ y = gpar.sample(x, p=m_true) @ B.randn(m_true, p)
 noise = 0.2
 y = y + noise ** .5 * B.randn(*B.shape(y))
 
-# Compute the principal components of the data to initialise the mixing matrix.
-pcs, pc_vals = B.svd(y.T @ y)[:2]
-
 
 def build(vs):
     """Build model."""
@@ -41,12 +38,12 @@ def build(vs):
     y_train = Dense(torch.tensor(y))
 
     # Construct the orthogonal matrices.
-    u_full = vs.orth(pcs, name='u_full')
+    u_full = vs.orth(shape=(p, p), name='u_full')
     u = Dense(u_full[:, :m])
     u_orth = Dense(u_full[:, m:])
 
     # Construct the mixing matrix and the projection.
-    s_sqrt = Diagonal(vs.pos(B.sqrt(pc_vals[:m]), name='s_sqrt'))
+    s_sqrt = Diagonal(vs.pos(B.ones(m), name='s_sqrt'))
     s = s_sqrt @ s_sqrt
     h = u @ s_sqrt
     h_pinv = B.inv(s_sqrt) @ u.T
@@ -69,19 +66,24 @@ def build(vs):
 
 def nlml(vs):
     """Compute the negative LML."""
-    m = build(vs)
-    return -(gpar.logpdf(m.x_train, m.proj) -
-             0.5 * n * (B.logdet(m.s) +
-                        B.logdet(Dense(m.proj_orth.T @ m.proj_orth))))
+    model = build(vs)
+
+    reg = B.logdet(model.s)
+    if dense_noise:
+        reg = reg + B.logdet(Dense(model.proj_orth.T @ model.proj_orth))
+    else:
+        reg = reg + (p - m) * B.log(B.sum(model.proj_orth ** 2))
+
+    return -gpar.logpdf(model.x_train, model.proj) + 0.5 * n * reg
 
 
 def predict(vs, x, num_samples=100):
     """Predict by sampling."""
-    m = build(vs)
-    h = B.to_numpy(m.h)
+    model = build(vs)
+    h = B.to_numpy(model.h)
 
     # Condition GPAR and sample from the posterior.
-    gpar.condition(B.to_numpy(m.x_train), B.to_numpy(m.proj))
+    gpar.condition(B.to_numpy(model.x_train), B.to_numpy(model.proj))
     samples = gpar.sample(x, num_samples=num_samples, posterior=True)
     samples = B.stack(*[sample @ h.T for sample in samples], axis=0)
 
