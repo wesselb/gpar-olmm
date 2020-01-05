@@ -1,12 +1,12 @@
 from collections import namedtuple
 
+import lab as B
 import matplotlib.pyplot as plt
 import torch
 import wbml.out
 import wbml.plot
 from gpar import GPARRegressor
-from lab import B
-from matrix import Dense, Diagonal
+from matrix import Dense
 from varz.torch import minimise_l_bfgs_b
 
 
@@ -16,20 +16,32 @@ def Model(**kw_args):
 
 # Model parameters:
 p = 16
-m = 5
+m = 4
 gpar = GPARRegressor()
-dense_noise = False
 
 m_true = m  # True number of latent processes.
 
 # Sample some test data.
 n = 200
-x = B.linspace(0, 10, n)
+x = B.linspace(0, 20, n)
 y = gpar.sample(x, p=m_true) @ B.randn(m_true, p)
 
 # Add noise to the test data.
-noise = 0.2
+noise = 0.1
 y = y + noise ** .5 * B.randn(*B.shape(y))
+
+# Split data.
+inds1_n = B.range(0, 100)
+inds2_n = B.range(100, 200)
+n1 = len(inds1_n)
+n2 = len(inds2_n)
+inds2_p = B.range(8, p)
+p1 = p
+p2 = len(inds2_p)
+
+
+def _pinv(h):
+    return B.cholsolve(B.dense(B.chol(Dense(h.T @ h))), B.dense(h.T))
 
 
 def build(vs):
@@ -37,47 +49,59 @@ def build(vs):
     x_train = torch.tensor(x)
     y_train = Dense(torch.tensor(y))
 
-    # Construct the orthogonal matrices.
-    u_full = vs.orth(shape=(p, p), name='u_full')
-    u = Dense(u_full[:, :m])
-    u_orth = Dense(u_full[:, m:])
+    h = vs.unbounded(shape=(p, m), name='h')
 
-    # Construct the mixing matrix and the projection.
-    s_sqrt = Diagonal(vs.pos(B.ones(m), name='s_sqrt'))
-    s = s_sqrt @ s_sqrt
-    h = u @ s_sqrt
-    h_pinv = B.inv(s_sqrt) @ u.T
+    x_train1 = x_train[inds1_n]
+    y_train1 = y_train[inds1_n]
+    h1 = h
+    pinv1 = _pinv(h1)
+    proj1 = y_train1 @ pinv1.T
+    proj1_orth = y_train1 - proj1 @ h1.T
 
-    # Project the data.
-    proj = y_train @ h_pinv.T
-    proj_orth = y_train @ u_orth
+    x_train2 = x_train[inds2_n]
+    y_train2 = y_train[inds2_n][:, inds2_p]
+    h2 = h[inds2_p]
+    pinv2 = _pinv(h2)
+    proj2 = y_train2 @ pinv2.T
+    proj2_orth = y_train2 - proj2 @ h2.T
 
     return Model(x_train=x_train,
                  y_train=y_train,
-                 proj=proj,
-                 proj_orth=proj_orth,
-                 u=u,
-                 u_orth=u_orth,
-                 s_sqrt=s_sqrt,
-                 s=s,
                  h=h,
-                 h_pinv=h_pinv)
+
+                 x_train1=x_train1,
+                 y_train1=y_train1,
+                 h1=h1,
+                 pinv1=pinv1,
+                 proj1=proj1,
+                 proj1_orth=proj1_orth,
+
+                 x_train2=x_train2,
+                 y_train2=y_train2,
+                 h2=h2,
+                 pinv2=pinv2,
+                 proj2=proj2,
+                 proj2_orth=proj2_orth,
+
+                 proj=B.concat(proj1, proj2, axis=0))
 
 
 def nlml(vs):
     """Compute the negative LML."""
     model = build(vs)
 
-    reg = B.logdet(model.s)
-    if dense_noise:
-        reg = reg + B.logdet(Dense(model.proj_orth.T @ model.proj_orth))
-    else:
-        reg = reg + (p - m) * B.log(B.sum(model.proj_orth ** 2))
+    # Construct regulariser.
+    logdet = n1 * B.logdet(Dense(model.h1.T @ model.h1)) + \
+             n2 * B.logdet(Dense(model.h2.T @ model.h2))
+    logfrob = (n1 * (p1 - m) + n2 * (p2 - m)) * \
+              B.log(B.sum(model.proj1_orth ** 2) +
+                    B.sum(model.proj2_orth ** 2))
+    reg = 0.5 * (logdet + logfrob)
 
-    return -gpar.logpdf(model.x_train, model.proj) + 0.5 * n * reg
+    return -gpar.logpdf(model.x_train, model.proj) + reg
 
 
-def predict(vs, x, num_samples=100):
+def predict(vs, x, num_samples=40):
     """Predict by sampling."""
     model = build(vs)
     h = B.to_numpy(model.h)
@@ -95,7 +119,7 @@ def predict(vs, x, num_samples=100):
 
 # Perform training.
 wbml.out.kv('NLML before', nlml(gpar.vs))
-minimise_l_bfgs_b(nlml, gpar.vs, trace=True)
+minimise_l_bfgs_b(nlml, gpar.vs, trace=True, iters=400)
 wbml.out.kv('NLML after', nlml(gpar.vs))
 
 # Perform prediction.
@@ -104,11 +128,15 @@ with wbml.out.Section('Predicting'):
 
 # Plot predictions.
 plt.figure()
-for i in range(p):
-    plt.subplot(int(p ** .5), int(p ** .5), i + 1)
-    plt.scatter(x, y[:, i], label='Observations', c='black')
+for i in range(min(p, 16)):
+    plt.subplot(4, 4, i + 1)
+    plt.scatter(x[inds1_n], y[inds1_n, i], label='Observations', c='black')
+    if i in inds2_p:
+        plt.scatter(x[inds2_n], y[inds2_n, i], label='Observations', c='black')
+    else:
+        plt.scatter(x[inds2_n], y[inds2_n, i], c='tab:red')
     plt.plot(x, mean[:, i], label='Prediction', c='tab:blue')
     plt.plot(x, lower[:, i], c='tab:blue', ls='--')
     plt.plot(x, upper[:, i], c='tab:blue', ls='--')
-    wbml.plot.tweak()
+    wbml.plot.tweak(legend=False)
 plt.show()
