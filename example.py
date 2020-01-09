@@ -83,7 +83,7 @@ def build(vs, h: Unbounded(shape=(p, m)), noise: Positive = 0.05):
     # Determine weights.
     cov_missing = noise * (_inv(h2.T @ h2) - _inv(h.T @ h))
     lat_noises = B.concat(*[vs[f'{i}/noise'][None] for i in range(m)])
-    weights = B.diag(cov_missing) / lat_noises + 1
+    weights = lat_noises / (lat_noises + B.diag(cov_missing))
     wbml.out.kv('Weights', weights)
 
     # Convert to weights for all data.
@@ -122,7 +122,7 @@ def nlml(vs):
     logfrob = (B.sum(model.proj1_orth ** 2) +
                B.sum(model.proj2_orth ** 2)) / model.noise
     reg = 0.5 * (logdet + lognoise + logfrob) + \
-          1e-4 * B.sum(model.weights ** 2)
+          1e-4 * B.sum((1 / model.weights) ** 2)
 
     gpar.vs = vs
     return -gpar.logpdf(model.x_train, model.proj, model.weights) + reg
