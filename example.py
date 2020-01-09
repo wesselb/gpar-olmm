@@ -1,5 +1,6 @@
 from collections import namedtuple
 
+import numpy as np
 import lab as B
 import matplotlib.pyplot as plt
 import torch
@@ -7,8 +8,8 @@ import wbml.out
 import wbml.plot
 from gpar import GPARRegressor
 from matrix import Dense
+from varz import parametrised, Unbounded, Positive
 from varz.torch import minimise_l_bfgs_b
-from varz import parametrised, Unbounded
 
 
 def Model(**kw_args):
@@ -18,79 +19,96 @@ def Model(**kw_args):
 # Model parameters:
 p = 16
 m = 4
-gpar = GPARRegressor(replace=True, impute=False, noise=0.2,
-                     normalise_y=False, linear=True, nonlinear=False,
-                     linear_scale=1)
+gpar = GPARRegressor(replace=True, impute=False, noise=0.05,
+                     normalise_y=False, linear=False, nonlinear=True)
 vs = gpar.vs
 
 m_true = m  # True number of latent processes.
 
 # Sample some test data.
 n = 200
-x = B.linspace(0, 20, n)
-y = gpar.sample(x, p=m_true) @ B.randn(m_true, p)
+x = B.linspace(0, 30, n)
+y = gpar.sample(x, w=B.ones(n, m_true), p=m_true) @ B.randn(m_true, p)
 
 # Add noise to the test data.
-noise = 0.1
+noise = 0.05
 y = y + noise ** .5 * B.randn(*B.shape(y))
 
 # Split data.
-inds1_n = B.range(0, 100)
-inds2_n = B.range(100, 200)
+n_split = 100
+inds1_n = B.range(0, n_split)
+inds2_n = B.range(n_split, n)
 n1 = len(inds1_n)
 n2 = len(inds2_n)
-inds2_p = B.range(14, p)
+inds2_p = B.range(p - m, p)
 p1 = p
 p2 = len(inds2_p)
-
-# Determine initialisation.
-pcs, vals = B.svd(y.T @ y)[:2]
-h_init = pcs[:, :m] * vals[None, :m] ** .5
 
 
 def _pinv(h):
     return B.cholsolve(B.dense(B.chol(Dense(h.T @ h))), B.dense(h.T))
 
 
+def _inv(a):
+    return B.cholsolve(B.dense(B.chol(Dense(a))), B.eye(a))
+
+
 @parametrised
-def build(vs, h: Unbounded = h_init):
+def build(vs, h: Unbounded(shape=(p, m)), noise: Positive = 0.05):
     """Build model."""
+    wbml.out.kv('Noise', noise)
+
     x_train = torch.tensor(x)
     y_train = Dense(torch.tensor(y))
 
+    u = B.svd(h)[0]
+    pinv = _pinv(h)
+
     x_train1 = x_train[inds1_n]
     y_train1 = y_train[inds1_n]
-    h1 = h
-    pinv1 = _pinv(h1)
-    proj1 = y_train1 @ pinv1.T
-    proj1_orth = y_train1 - proj1 @ h1.T
+    proj1 = y_train1 @ pinv.T
+    proj1_orth = y_train1 - proj1 @ h.T
 
     x_train2 = x_train[inds2_n]
     y_train2 = y_train[inds2_n][:, inds2_p]
     h2 = h[inds2_p]
-    pinv2 = _pinv(h2)
-    proj2 = y_train2 @ pinv2.T
-    proj2_orth = y_train2 - proj2 @ h2.T
+    u2 = u[inds2_p]
+    proj2 = y_train2 @ (pinv @ u @ _pinv(u2)).T
+    proj2_orth = y_train2 - y_train2 @ (h2 @ _pinv(h2)).T
+
+    # Check spectral gap for debugging.
+    vals = B.svd(u2.T @ u2)[1]
+    wbml.out.kv('Spectral gap', vals[0] - vals[-1])
+
+    # Determine weights.
+    cov_missing = noise * (_inv(h2.T @ h2) - _inv(h.T @ h))
+    lat_noises = B.concat(*[vs[f'{i}/noise'][None] for i in range(m)])
+    weights = B.diag(cov_missing) / lat_noises + 1
+    wbml.out.kv('Weights', weights)
+
+    # Convert to weights for all data.
+    dtype = B.dtype(weights)
+    weights = B.concat(B.ones(dtype, n1, m),
+                       B.ones(dtype, n2, m) * weights[None, :], axis=0)
 
     return Model(x_train=x_train,
                  y_train=y_train,
                  h=h,
+                 noise=noise,
 
                  x_train1=x_train1,
                  y_train1=y_train1,
-                 h1=h1,
-                 pinv1=pinv1,
                  proj1=proj1,
                  proj1_orth=proj1_orth,
 
                  x_train2=x_train2,
                  y_train2=y_train2,
-                 h2=h2,
-                 pinv2=pinv2,
                  proj2=proj2,
                  proj2_orth=proj2_orth,
+                 u2=u2,
 
-                 proj=B.concat(proj1, proj2, axis=0))
+                 proj=B.concat(proj1, proj2, axis=0),
+                 weights=weights)
 
 
 def nlml(vs):
@@ -98,26 +116,30 @@ def nlml(vs):
     model = build(vs)
 
     # Construct regulariser.
-    logdet = n1 * B.logdet(Dense(model.h1.T @ model.h1)) + \
-             n2 * B.logdet(Dense(model.h2.T @ model.h2))
-    logfrob = (n1 * (p1 - m) + n2 * (p2 - m)) * \
-              B.log(B.sum(model.proj1_orth ** 2) +
-                    B.sum(model.proj2_orth ** 2))
-    reg = 0.5 * (logdet + logfrob)
+    logdet = n * B.logdet(Dense(model.h.T @ model.h)) + \
+             n2 * B.logdet(Dense(model.u2.T @ model.u2))
+    lognoise = (n1 * (p1 - m) + n2 * (p2 - m)) * B.log(2 * B.pi * model.noise)
+    logfrob = (B.sum(model.proj1_orth ** 2) +
+               B.sum(model.proj2_orth ** 2)) / model.noise
+    reg = 0.5 * (logdet + lognoise + logfrob) + \
+          1e-4 * B.sum(model.weights ** 2)
 
     gpar.vs = vs
-    return -gpar.logpdf(model.x_train, model.proj) + reg
+    return -gpar.logpdf(model.x_train, model.proj, model.weights) + reg
 
 
-def predict(vs, x, num_samples=40):
+def predict(vs, x, num_samples=100):
     """Predict by sampling."""
     model = build(vs)
     h = B.to_numpy(model.h)
+    weights = B.to_numpy(model.weights)
 
     # Condition GPAR and sample from the posterior.
     gpar.vs = vs
-    gpar.condition(B.to_numpy(model.x_train), B.to_numpy(model.proj))
-    samples = gpar.sample(x, num_samples=num_samples, posterior=True)
+    gpar.condition(B.to_numpy(model.x_train),
+                   B.to_numpy(model.proj),
+                   weights)
+    samples = gpar.sample(x, weights, num_samples=num_samples, posterior=True)
 
     # Compute empirical mean and error bars for predictions of latents.
     samples_lat = B.stack(*samples, axis=0)
@@ -140,7 +162,7 @@ def predict(vs, x, num_samples=40):
 with wbml.out.Section('Before training'):
     wbml.out.kv('NLML', nlml(vs))
     vs.print()
-minimise_l_bfgs_b(nlml, vs, trace=True, iters=200)
+minimise_l_bfgs_b(nlml, vs, trace=True, iters=1000)
 with wbml.out.Section('After training'):
     wbml.out.kv('NLML', nlml(vs))
     vs.print()
@@ -152,7 +174,7 @@ with wbml.out.Section('Predicting'):
 
 # Plot predictions for latent processes.
 plt.figure(figsize=(12, 8))
-num = 2
+num = int(np.ceil(m ** .5))
 obs_lat = B.to_numpy(build(vs).proj)
 for i in range(min(m, num * num)):
     plt.subplot(num, num, i + 1)
@@ -164,7 +186,7 @@ for i in range(min(m, num * num)):
 
 # Plot predictions.
 plt.figure(figsize=(12, 8))
-num = 4
+num = int(np.ceil(p ** .5))
 for i in range(min(p, num * num)):
     plt.subplot(num, num, i + 1)
     plt.scatter(x[inds1_n], y[inds1_n, i], label='Observations', c='black')
