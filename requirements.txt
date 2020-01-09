@@ -10,7 +10,7 @@ git+git://github.com/wesselb/varz@master#egg=varz
 git+git://github.com/wesselb/wbml@master#egg=wbml
 git+git://github.com/wesselb/matrix@master#egg=backends-matrix
 git+git://github.com/wesselb/stheno@master#egg=stheno
-git+git://github.com/wesselb/gpar@master#egg=gpar
+git+git://github.com/wesselb/gpar@weighting#egg=gpar
 
 ## Once all packages are updated, the below pip stack should work.
 # backends
