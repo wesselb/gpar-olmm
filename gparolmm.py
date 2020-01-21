@@ -29,88 +29,94 @@ class GPAROLMM:
         self.vs = vs # Side-effect!
         self.gpar.vs = vs # Side-effect! This is ugly but works
 
-        # Initialise things
-        p = self.p
-        m = self.m
-        h = vs['h']
-        noise = vs['noise']
-        u = B.svd(h)[0]
-        pinv = _pinv(h)
-        x_train = torch.tensor(x)
-        y_train = Dense(torch.tensor(y))
-        proj = y_train @ pinv.T
-        proj_orth = y_train - proj @ h.T
+        proj_x, proj_y, proj_w, reg = self._project(x, y)
+        return self.gpar.logpdf(proj_x, proj_y, proj_w) - reg
+
+    def _project(self, x, y):
         n = B.shape(x)[0]
+        available = ~B.isnan(B.to_numpy(y))
 
-        # Construct regulariser.
-        logdet = n * B.logdet(Dense(h.T @ h))
-        lognoise = (n * (p - m)) * B.log(2 * B.pi * noise)
-        logfrob = B.sum(proj_orth ** 2) / noise
-        reg = 0.5 * (logdet + lognoise + logfrob)
+        # Extract patterns.
+        patterns = list(set(map(tuple, list(available))))
 
-        return self.gpar.logpdf(x_train, proj, B.ones(n, m)) - reg
+        if len(patterns) > 30:
+            warnings.warn(f'Detected {len(patterns)} patterns, which is more '
+                          f'than 30.',
+                          category=UserWarning)
 
-    def logpdf_missing(
-        self,
-        x,
-        y,
-        inds1_n,
-        inds2_n,
-        inds2_p,
-        vs,
-    ):
-        self.vs = vs # Side-effect!
+        # Per pattern, find data points that belong to it.
+        patterns_inds = [[] for _ in range(len(patterns))]
+        for i in range(n):
+            patterns_inds[patterns.index(tuple(available[i]))].append(i)
 
-        # Initialise things
-        p = self.p
-        m = self.m
-        h = vs['h']
-        noise = vs['noise']
+        # Per pattern, perform the projection.
+        proj_xs = []
+        proj_ys = []
+        proj_ws = []
+        total_reg = 0
+
+        for pattern, pattern_inds in zip(patterns, patterns_inds):
+            proj_x, proj_y, proj_w, reg = \
+                self._project_pattern(B.take(x, pattern_inds),
+                                      B.take(y, pattern_inds),
+                                      pattern)
+
+            proj_xs.append(proj_x)
+            proj_ys.append(proj_y)
+            proj_ws.append(proj_w)
+            total_reg = total_reg + reg
+
+        return B.concat(*proj_xs, axis=0), \
+               B.concat(*proj_ys, axis=0), \
+               B.concat(*proj_ws, axis=0), \
+               total_reg
+
+    def _project_pattern(self, x, y, pattern):
+        # Filter by the given pattern.
+        y = B.take(y, pattern, axis=1)
+
+        # Get number of data points and outputs in this part of the data.
         n = B.shape(x)[0]
-        n1 = len(inds1_n)
-        n2 = len(inds2_n)
+        p = sum(pattern)
+
+        # Build mixing matrix and projection.
+        h = self.vs['h']
+        hcopy = B.to_numpy(h)
+        if np.isnan(hcopy).any():
+            exit()
+        print('H: ', h)
+        hm = B.take(h, pattern)
         u = B.svd(h)[0]
-        pinv = _pinv(h)
-        x_train = torch.tensor(x)
-        y_train = Dense(torch.tensor(y))
-        proj = y_train @ pinv.T
-        p1 = p
-        p2 = len(inds2_p)
+        um = B.take(u, pattern)
+        proj = B.matmul(_pinv(h), B.matmul(u, _pinv(um))).T
+        proj_orth = B.matmul(hm, _pinv(hm)).T
 
-        # Deal with missings
-        x_train1 = x_train[inds1_n]
-        y_train1 = y_train[inds1_n]
-        proj1 = y_train1 @ pinv.T
-        proj1_orth = y_train1 - proj1 @ h.T
+        # Perform projection.
+        proj_y = B.matmul(y, proj)
+        proj_y_orth = y - B.matmul(y, proj_orth)
 
-        x_train2 = x_train[inds2_n]
-        y_train2 = y_train[inds2_n][:, inds2_p]
-        h2 = h[inds2_p]
-        u2 = u[inds2_p]
-        proj2 = y_train2 @ (pinv @ u @ _pinv(u2)).T
-        proj2_orth = y_train2 - y_train2 @ (h2 @ _pinv(h2)).T
+        # Compute projected noise.
+        h_sq = B.matmul(h.T, h)
+        hm_sq = B.matmul(hm.T, hm)
+        noise = self.vs['noise']
+        print('noise: ', noise)
+        proj_noise = noise * (_inv(hm_sq) - _inv(h_sq))
 
-        # Maybe add spectral gap and other debugging stuff later
-
-        # Determine weights.
-        cov_missing = noise * (_inv(h2.T @ h2) - _inv(h.T @ h))
+        # Convert projected noise to weights.
         # This requires the self.gpar to have been initialised! That means we need to call
-        # self.gpar.sample or something similar.
-        lat_noises = B.concat(*[vs[f'{i}/noise'][None] for i in range(m)])
-        weights = lat_noises / (lat_noises + B.diag(cov_missing))
+        # self.gpar.sample or something similar. Ugly, again.
+        m = self.m
+        lat_noises = B.concat(*[self.vs[f'{i}/noise'][None] for i in range(m)])
+        print('latnoises: ', lat_noises)
+        weights = lat_noises / (lat_noises + B.diag(proj_noise))
+        print('weights: ', weights)
+        proj_w = B.ones(self.vs.dtype, n, m) * weights[None, :]
 
-        # Convert to weights for all data.
-        dtype = B.dtype(weights)
-        weights = B.concat(
-            B.ones(dtype, n1, m),
-            B.ones(dtype, n2, m) * weights[None, :],
-            axis=0
-        )
-
-        # Construct regulariser.
-        logdet = n * B.logdet(Dense(h.T @ h)) + n2 * B.logdet(Dense(u2.T @ u2))
-        lognoise = (n1 * (p1 - m) + n2 * (p2 - m)) * B.log(2 * B.pi * noise)
-        logfrob = (B.sum(proj1_orth ** 2) + B.sum(proj2_orth ** 2)) / noise
-        reg = 0.5 * (logdet + lognoise + logfrob) + 1e-4 * B.sum((1 / weights) ** 2)
-
-        return self.gpar.logpdf(x_train, proj, weights) - reg
+        # Compute regularising term.
+        reg = 0.5 * (n * (p - m) * B.log(2 * B.pi * noise) + # lognoise
+                    B.sum(proj_y_orth ** 2) / noise + # logfrob
+                    n * B.logdet(B.reg(B.matmul(um.T, um))) + # logdet
+                    1e-4 * B.sum((1 / weights) ** 2)) # This is a regularisation term,
+                                                      # rigorously, does not belong in here
+        print('reg: ', reg)
+        return x, proj_y, proj_w, reg
