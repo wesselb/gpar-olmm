@@ -1,5 +1,8 @@
 from gpar import GPARRegressor
 from varz import Vars
+import matplotlib.pyplot as plt
+import numpy as np
+import wbml.plot
 import lab as B
 
 
@@ -137,16 +140,17 @@ class GPAROLMM:
             x, latent=latent, credible_bounds=True, num_samples=num_samples
         )
 
+        h = self.vs['h']
         # Pull means and variances through mixing matrix.
-        means = B.matmul(means, self.h, tr_b=True)
-        lowers = B.matmul(lowers, self.h, tr_b=True)
-        uppers = B.matmul(uppers, self.h, tr_b=True)
+        means = B.matmul(means, h, tr_b=True)
+        lowers = B.matmul(lowers, h, tr_b=True)
+        uppers = B.matmul(uppers, h, tr_b=True)
 
         if not latent:
             # compute noise on orthogonal complement in a very dumb way.
             # Gotta double-check.
-            proj = B.matmul(hm, _pinv(hm)).T
-            proj_orth = B.eye(B.shape(proj)[0]) - proj
+            proj = B.matmul(h, _pinv(h)).T
+            proj_orth = B.eye(B.dtype(proj), B.shape(proj)[0]) - proj
             orth_noise = self.noise * proj_orth
             lowers = lowers - B.diag(orth_noise)
             uppers = uppers + B.diag(orth_noise)
@@ -157,13 +161,14 @@ class GPAROLMM:
         latent_sample = self.gpar.sample(
             x, p=self.m, latent=latent, num_samples=100
         )
-        observed_sample = B.matmul(latent_sample, self.h, tr_b=True)
+        h = self.vs['h']
+        observed_sample = B.matmul(latent_sample, h, tr_b=True)
         if not latent:
             # compute noise on orthogonal complement in a very dumb way.
             # Gotta double-check.
-            proj = B.matmul(hm, _pinv(hm)).T
-            proj_orth = B.eye(B.shape(proj)[0]) - proj
-            orth_noise = self.noise * proj_orth
+            proj = B.matmul(h, _pinv(h)).T
+            proj_orth = B.eye(B.dtype(proj), B.shape(proj)[0]) - proj
+            orth_noise = self.vs['noise']  * proj_orth
             observed_sample = observed_sample + \
                               B.chol(B.reg(orth_noise)) * B.randn(observed_sample)
         return observed_sample
@@ -173,12 +178,15 @@ class GPAROLMM:
         m = self.m
         num = int(np.ceil(m ** .5))
         means, lowers, uppers = self.gpar.predict(
-            x, latent=latent, credible_bounds=true, num_samples=num_samples
+            x, latent=latent, credible_bounds=True, num_samples=num_samples
         )
+        h = self.vs['h']
+        proj = B.matmul(h, _pinv(h))
         for i in range(min(m, num * num)):
             plt.subplot(num, num, i + 1)
-            if y:
-                plt.scatter(x, y[:, i], label='Observations', c='black')
+            if y is not None:
+                yp = B.matmul(y, proj, tr_b=True)
+                plt.scatter(x, yp[:, i], label='Observations', c='black')
             plt.plot(x, means[:, i], label='Prediction', c='tab:blue')
             plt.plot(x, lowers[:, i], c='tab:blue', ls='--')
             plt.plot(x, uppers[:, i], c='tab:blue', ls='--')
@@ -192,9 +200,9 @@ class GPAROLMM:
         means, lowers, uppers = self.predict(x, latent=latent, num_samples=num_samples)
         for i in range(min(p, num * num)):
             plt.subplot(num, num, i + 1)
-            if y:
+            if y is not None:
                 plt.scatter(x, y[:, i], label='Observations', c='black')
-            if xm and ym:
+            if (xm is not None) and (ym is not None):
                 plt.scatter(xm, ym[:, i], c='tab:red')
             plt.plot(x, means[:, i], label='Prediction', c='tab:blue')
             plt.plot(x, lowers[:, i], c='tab:blue', ls='--')
