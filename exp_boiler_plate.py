@@ -42,10 +42,7 @@ class GPAROLMM:
 
         proj_x, proj_y, proj_w, reg = self._project(x, y)
         logpdf = self.gpar.logpdf(proj_x, proj_y, proj_w)
-        print('*** logpdf: ', logpdf)
-        print('*** reg: ', reg)
         return logpdf - reg
-        # return self.gpar.logpdf(proj_x, proj_y, proj_w) - reg
 
     def _project(self, x, y):
         n = B.shape(x)[0]
@@ -137,7 +134,7 @@ class GPAROLMM:
 
     def predict(self, x, latent=False, num_samples=100):
         means, lowers, uppers = self.gpar.predict(
-            x, latent=latent, credible_bounds=true, num_samples=num_samples
+            x, latent=latent, credible_bounds=True, num_samples=num_samples
         )
 
         # Pull means and variances through mixing matrix.
@@ -171,43 +168,36 @@ class GPAROLMM:
                               B.chol(B.reg(orth_noise)) * B.randn(observed_sample)
         return observed_sample
 
-# def plot_latents(vs, m, x, mean_lat, lower_lat, upper_lat):
-#     plt.figure(figsize=(12, 8))
-#     num = int(np.ceil(m ** .5))
-#     obs_lat = B.to_numpy(build(vs).proj)
-#     for i in range(min(m, num * num)):
-#         plt.subplot(num, num, i + 1)
-#         plt.scatter(x, obs_lat[:, i], label='Observations', c='black')
-#         plt.plot(x, mean_lat[:, i], label='Prediction', c='tab:blue')
-#         plt.plot(x, lower_lat[:, i], c='tab:blue', ls='--')
-#         plt.plot(x, upper_lat[:, i], c='tab:blue', ls='--')
-#         wbml.plot.tweak(legend=False)
-#     plt.show()
-#
-# def plot_missing_outputs(p, x, y, inds1_n, inds2_n, inds2_p, mean, lower, upper):
-#     plt.figure(figsize=(12, 8))
-#     num = int(np.ceil(p ** .5))
-#     for i in range(min(p, num * num)):
-#         plt.subplot(num, num, i + 1)
-#         plt.scatter(x[inds1_n], y[inds1_n, i], label='Observations', c='black')
-#         if i in inds2_p:
-#             plt.scatter(x[inds2_n], y[inds2_n, i], label='Observations', c='black')
-#         else:
-#             plt.scatter(x[inds2_n], y[inds2_n, i], c='tab:red')
-#         plt.plot(x, mean[:, i], label='Prediction', c='tab:blue')
-#         plt.plot(x, lower[:, i], c='tab:blue', ls='--')
-#         plt.plot(x, upper[:, i], c='tab:blue', ls='--')
-#         wbml.plot.tweak(legend=False)
-#     plt.show()
-#
-# def plot_outputs(p, x, y, mean, lower, upper):
-#     plt.figure(figsize=(12, 8))
-#     num = int(np.ceil(p ** .5))
-#     for i in range(min(p, num * num)):
-#         plt.subplot(num, num, i + 1)
-#         plt.scatter(x, y[:, i], label='Observations', c='black')
-#         plt.plot(x, mean[:, i], label='Prediction', c='tab:blue')
-#         plt.plot(x, lower[:, i], c='tab:blue', ls='--')
-#         plt.plot(x, upper[:, i], c='tab:blue', ls='--')
-#         wbml.plot.tweak(legend=False)
-#     plt.show()
+    def plot_latents(self, x, y=None, latent=False, num_samples=100):
+        plt.figure(figsize=(12, 8))
+        m = self.m
+        num = int(np.ceil(m ** .5))
+        means, lowers, uppers = self.gpar.predict(
+            x, latent=latent, credible_bounds=true, num_samples=num_samples
+        )
+        for i in range(min(m, num * num)):
+            plt.subplot(num, num, i + 1)
+            if y:
+                plt.scatter(x, y[:, i], label='Observations', c='black')
+            plt.plot(x, means[:, i], label='Prediction', c='tab:blue')
+            plt.plot(x, lowers[:, i], c='tab:blue', ls='--')
+            plt.plot(x, uppers[:, i], c='tab:blue', ls='--')
+            wbml.plot.tweak(legend=False)
+        plt.show()
+
+    def plot_outputs(self, x, y=None, xm=None, ym=None, latent=False, num_samples=100):
+        plt.figure(figsize=(12, 8))
+        p = self.p
+        num = int(np.ceil(p ** .5))
+        means, lowers, uppers = self.predict(x, latent=latent, num_samples=num_samples)
+        for i in range(min(p, num * num)):
+            plt.subplot(num, num, i + 1)
+            if y:
+                plt.scatter(x, y[:, i], label='Observations', c='black')
+            if xm and ym:
+                plt.scatter(xm, ym[:, i], c='tab:red')
+            plt.plot(x, means[:, i], label='Prediction', c='tab:blue')
+            plt.plot(x, lowers[:, i], c='tab:blue', ls='--')
+            plt.plot(x, uppers[:, i], c='tab:blue', ls='--')
+            wbml.plot.tweak(legend=False)
+        plt.show()
