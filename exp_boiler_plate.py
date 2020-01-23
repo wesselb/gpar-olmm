@@ -180,12 +180,12 @@ class GPAROLMM:
         means, lowers, uppers = self.gpar.predict(
             x, latent=latent, credible_bounds=True, num_samples=num_samples
         )
-        h = self.vs['h']
-        proj = B.matmul(h, _pinv(h))
+        if y is not None:
+            h = self.vs['h']
+            yp = B.matmul(y, _pinv(h), tr_b=True)
         for i in range(min(m, num * num)):
             plt.subplot(num, num, i + 1)
             if y is not None:
-                yp = B.matmul(y, proj, tr_b=True)
                 plt.scatter(x, yp[:, i], label='Observations', c='black')
             plt.plot(x, means[:, i], label='Prediction', c='tab:blue')
             plt.plot(x, lowers[:, i], c='tab:blue', ls='--')
