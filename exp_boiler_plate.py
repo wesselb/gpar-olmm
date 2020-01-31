@@ -19,7 +19,6 @@ def _pinv(a):
 # - Remove side-effects from `logpdf`.
 # - Separate `logpdf` into itself plus `objective`. Have the L2 regulariser on the weights
 # show up only in the objective.
-# - Add plotting back.
 # - Add docstrings.
 # - Optimise code.
 
@@ -39,15 +38,15 @@ class GPAROLMM:
         self.vs.get(h, name='h') # attach the mixing matrix to the variable vector
         self.vs.pos(noise, name='noise')
 
-    def logpdf(self, x, y, vs):
+    def logpdf(self, x, y, vs, usereg=False):
         self.vs = vs # Side-effect!
         self.gpar.vs = vs # Side-effect! This is ugly but works
 
-        proj_x, proj_y, proj_w, reg = self._project(x, y)
+        proj_x, proj_y, proj_w, reg = self._project(x, y, usereg)
         logpdf = self.gpar.logpdf(proj_x, proj_y, proj_w)
         return logpdf - reg
 
-    def _project(self, x, y):
+    def _project(self, x, y, usereg=False):
         n = B.shape(x)[0]
         available = ~B.isnan(B.to_numpy(y))
 
@@ -74,7 +73,7 @@ class GPAROLMM:
             proj_x, proj_y, proj_w, reg = \
                 self._project_pattern(B.take(x, pattern_inds),
                                       B.take(y, pattern_inds),
-                                      pattern)
+                                      pattern, usereg)
 
             proj_xs.append(proj_x)
             proj_ys.append(proj_y)
@@ -86,7 +85,7 @@ class GPAROLMM:
                B.concat(*proj_ws, axis=0), \
                total_reg
 
-    def _project_pattern(self, x, y, pattern):
+    def _project_pattern(self, x, y, pattern, usereg):
         # Filter by the given pattern.
         y = B.take(y, pattern, axis=1)
 
@@ -124,9 +123,11 @@ class GPAROLMM:
         reg = 0.5 * (n * (p - m) * B.log(2 * B.pi * noise) + # lognoise
                     B.sum(proj_y_orth ** 2) / noise + # logfrob
                     n * B.logdet(B.reg(B.matmul(h, h, tr_a=True))) + # logdet1
-                    n * B.logdet(B.reg(B.matmul(um, um, tr_a=True))) + # logdet2
-                    1e-4 * B.sum((1 / weights) ** 2)) # This is a regularisation term,
-                                                      # rigorously, does not belong in here
+                    n * B.logdet(B.reg(B.matmul(um, um, tr_a=True)))) # logdet2
+
+        if usereg:
+            reg += 1e-1 * B.sum((1 / weights) ** 2) # This is a regularisation term,
+                                              # rigorously, does not belong in here
 
         return x, proj_y, proj_w, reg
 
@@ -151,7 +152,7 @@ class GPAROLMM:
             # Gotta double-check.
             proj = B.matmul(h, _pinv(h)).T
             proj_orth = B.eye(B.dtype(proj), B.shape(proj)[0]) - proj
-            orth_noise = self.noise * proj_orth
+            orth_noise = self.vs['noise'] * proj_orth
             lowers = lowers - B.diag(orth_noise)
             uppers = uppers + B.diag(orth_noise)
 
@@ -204,7 +205,7 @@ class GPAROLMM:
                 plt.scatter(x, y[:, i], label='Observations', c='black')
             if (xm is not None) and (ym is not None):
                 plt.scatter(xm, ym[:, i], c='tab:red')
-            plt.plot(x, means[:, i], label='Prediction', c='tab:blue')
+            plt.plot(x, means[:, i], label='Prediction', c='tab:red')
             plt.plot(x, lowers[:, i], c='tab:blue', ls='--')
             plt.plot(x, uppers[:, i], c='tab:blue', ls='--')
             wbml.plot.tweak(legend=False)
